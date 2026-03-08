@@ -1,0 +1,8 @@
+## Interface: 120001
+## Title: Keybinds on Cooldown Manager
+## Notes: Displays keybinds on Cooldown Manager icons
+## Author: You (with AI assistance)
+## Version: 1.0
+## SavedVariables: KeybindsOnCDM_DB
+
+KeybindsOnCDM.lua
