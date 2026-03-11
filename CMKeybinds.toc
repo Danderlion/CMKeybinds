@@ -1,0 +1,9 @@
+## Interface: 120001
+## Title: CM Keybinds
+## Notes: Shows keybinds on Blizzard Cooldown Manager icons
+## Author: 
+## Version: 1.0
+## LoadOnDemand: 0
+## SavedVariables: CMKeybindsDB
+
+CMKeybinds.lua

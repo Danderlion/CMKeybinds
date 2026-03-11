@@ -1,0 +1,667 @@
+-- CM Keybinds - Shows keybinds on Blizzard Cooldown Manager icons
+-- Standalone version for WoW 12.0.1 (Midnight)
+
+local addonName, ns = ...
+
+-- ============================================================================
+-- CONFIGURATION SECTION - EDIT THESE VALUES TO CUSTOMIZE BEHAVIOR
+-- ============================================================================
+
+local CONFIG = {
+    -- Debug Settings
+    DEBUG_MODE = false,                     -- Set to true to see debug messages in chat
+    
+    -- Default Font Settings (applies to all viewers unless overridden below)
+    DEFAULT_FONT_NAME = "Friz Quadrata TT",  -- Font to use for keybind text
+    DEFAULT_FONT_FLAGS = {},                  -- Font flags (e.g., {OUTLINE = true, THICKOUTLINE = true})
+    
+    -- Individual Viewer Settings
+    VIEWERS = {
+        Essential = {
+            ENABLED = true,                   -- Show keybinds on Essential bar
+            FONT_SIZE = 18,                    -- Font size for Essential bar
+            ANCHOR = "CENTER",                  -- Anchor point (CENTER, TOP, BOTTOM, LEFT, RIGHT, etc.)
+            OFFSET_X = 0,                        -- Horizontal offset from anchor
+            OFFSET_Y = 0,                        -- Vertical offset from anchor
+        },
+        Utility = {
+            ENABLED = true,                     -- Show keybinds on Utility bar
+            FONT_SIZE = 12,                      -- Font size for Utility bar (smaller)
+            ANCHOR = "CENTER",                    -- Anchor point
+            OFFSET_X = 0,                          -- Horizontal offset
+            OFFSET_Y = 0,                          -- Vertical offset
+        },
+        CMCTracker = {
+            ENABLED = true,                       -- Show keybinds on CMC Trackers
+            FONT_SIZE = 14,                        -- Font size for CMC Trackers
+            ANCHOR = "CENTER",                      -- Anchor point
+            OFFSET_X = 0,                            -- Horizontal offset
+            OFFSET_Y = 0,                            -- Vertical offset
+        },
+    },
+    
+    -- Spell ID Overrides
+    -- Format: [sourceSpellID] = targetSpellID
+    -- Example: When spell 1248829 is found, use the keybind for spell 190356 instead
+    SPELL_OVERRIDES = {
+        [1248829] = 190356,
+    },
+}
+
+-- ============================================================================
+-- END OF CONFIGURATION SECTION
+-- ============================================================================
+
+local Keybinds = {}
+ns.Keybinds = Keybinds
+
+local PrintDebug = function(...)
+    if CONFIG.DEBUG_MODE then
+        print("[CM Keybinds]", ...)
+    end
+end
+
+local isModuleEnabled = false
+local areHooksInitialized = false
+local spellIDToKeyBindCache = {}
+
+local viewersSettingKey = {
+    EssentialCooldownViewer = "Essential",
+    UtilityCooldownViewer = "Utility",
+    CMCTracker1 = "CMCTracker",
+    CMCTracker2 = "CMCTracker",
+}
+
+-- ============================================================================
+-- DATABASE HANDLING
+-- ============================================================================
+
+-- Default database structure (populated from CONFIG)
+local defaults = {
+    profile = {
+        -- Enabled states from config
+        cooldownManager_showKeybinds_Essential = CONFIG.VIEWERS.Essential.ENABLED,
+        cooldownManager_showKeybinds_Utility = CONFIG.VIEWERS.Utility.ENABLED,
+        cooldownManager_showKeybinds_CMCTracker = CONFIG.VIEWERS.CMCTracker.ENABLED,
+        
+        -- Font settings
+        cooldownManager_keybindFontName = CONFIG.DEFAULT_FONT_NAME,
+        cooldownManager_keybindFontFlags = CONFIG.DEFAULT_FONT_FLAGS,
+        
+        -- Per-viewer font sizes
+        cooldownManager_keybindFontSize_Essential = CONFIG.VIEWERS.Essential.FONT_SIZE,
+        cooldownManager_keybindFontSize_Utility = CONFIG.VIEWERS.Utility.FONT_SIZE,
+        cooldownManager_keybindFontSize_CMCTracker = CONFIG.VIEWERS.CMCTracker.FONT_SIZE,
+        
+        -- Per-viewer anchor points
+        cooldownManager_keybindAnchor_Essential = CONFIG.VIEWERS.Essential.ANCHOR,
+        cooldownManager_keybindAnchor_Utility = CONFIG.VIEWERS.Utility.ANCHOR,
+        cooldownManager_keybindAnchor_CMCTracker = CONFIG.VIEWERS.CMCTracker.ANCHOR,
+        
+        -- Per-viewer offsets
+        cooldownManager_keybindOffsetX_Essential = CONFIG.VIEWERS.Essential.OFFSET_X,
+        cooldownManager_keybindOffsetY_Essential = CONFIG.VIEWERS.Essential.OFFSET_Y,
+        cooldownManager_keybindOffsetX_Utility = CONFIG.VIEWERS.Utility.OFFSET_X,
+        cooldownManager_keybindOffsetY_Utility = CONFIG.VIEWERS.Utility.OFFSET_Y,
+        cooldownManager_keybindOffsetX_CMCTracker = CONFIG.VIEWERS.CMCTracker.OFFSET_X,
+        cooldownManager_keybindOffsetY_CMCTracker = CONFIG.VIEWERS.CMCTracker.OFFSET_Y,
+    }
+}
+
+-- Initialize database
+CMKeybindsDB = CMKeybindsDB or {}
+ns.db = { profile = CMKeybindsDB }
+
+-- Merge with defaults (only set missing values)
+for key, value in pairs(defaults.profile) do
+    if ns.db.profile[key] == nil then
+        ns.db.profile[key] = value
+    end
+end
+
+-- Spell ID Overrides from config
+ns.SpellIDOverrides = CONFIG.SPELL_OVERRIDES
+
+-- ============================================================================
+-- UTILITY FUNCTIONS
+-- ============================================================================
+
+local DEFAULT_FONT_PATH = "Fonts\\FRIZQT__.TTF"
+
+local function GetFontPath(fontName)
+    if not fontName or fontName == "" then
+        return DEFAULT_FONT_PATH
+    end
+    return DEFAULT_FONT_PATH
+end
+
+local function IsKeybindEnabledForAnyViewer()
+    if not ns.db or not ns.db.profile then
+        return false
+    end
+    for _, viewerSettingName in pairs(viewersSettingKey) do
+        local enabledKey = "cooldownManager_showKeybinds_" .. viewerSettingName
+        if ns.db.profile[enabledKey] then
+            return true
+        end
+    end
+    return false
+end
+
+local function GetKeybindSettings(viewerSettingName)
+    local defaults = {
+        anchor = "CENTER",
+        fontSize = 14,
+        offsetX = 0,
+        offsetY = 0,
+    }
+    if not ns.db or not ns.db.profile then
+        return defaults
+    end
+    return {
+        anchor = ns.db.profile["cooldownManager_keybindAnchor_" .. viewerSettingName] or defaults.anchor,
+        fontSize = ns.db.profile["cooldownManager_keybindFontSize_" .. viewerSettingName] or defaults.fontSize,
+        offsetX = ns.db.profile["cooldownManager_keybindOffsetX_" .. viewerSettingName] or defaults.offsetX,
+        offsetY = ns.db.profile["cooldownManager_keybindOffsetY_" .. viewerSettingName] or defaults.offsetY,
+    }
+end
+
+-- ============================================================================
+-- KEYBIND FORMATTING
+-- ============================================================================
+
+local function GetFormattedKeybind(key)
+    if not key or key == "" then
+        return ""
+    end
+
+    local bindingText = GetBindingText and GetBindingText(key, "KEY_", true)
+    local displayKey = (bindingText and bindingText ~= "") and bindingText or key
+    if displayKey:find("|", 1, true) then
+        return displayKey
+    end
+
+    local upperKey = key:upper()
+
+    -- Controller bindings
+    upperKey = upperKey:gsub("PADLTRIGGER", "LT")
+    upperKey = upperKey:gsub("PADRTRIGGER", "RT")
+    upperKey = upperKey:gsub("PADLSHOULDER", "LB")
+    upperKey = upperKey:gsub("PADRSHOULDER", "RB")
+    upperKey = upperKey:gsub("PADLSTICK", "LS")
+    upperKey = upperKey:gsub("PADRSTICK", "RS")
+    upperKey = upperKey:gsub("PADDPADUP", "D↑")
+    upperKey = upperKey:gsub("PADDPADDOWN", "D↓")
+    upperKey = upperKey:gsub("PADDPADLEFT", "D←")
+    upperKey = upperKey:gsub("PADDPADRIGHT", "D→")
+    upperKey = upperKey:gsub("^PAD", "")
+
+    -- Modifier keys
+    upperKey = upperKey:gsub("SHIFT%-", "S")
+    upperKey = upperKey:gsub("META%-", "M")
+    upperKey = upperKey:gsub("CTRL%-", "C")
+    upperKey = upperKey:gsub("ALT%-", "A")
+    upperKey = upperKey:gsub("STRG%-", "ST") -- German Ctrl
+
+    -- Mouse bindings
+    upperKey = upperKey:gsub("MOUSE%s?WHEEL%s?UP", "MWU")
+    upperKey = upperKey:gsub("MOUSE%s?WHEEL%s?DOWN", "MWD")
+    upperKey = upperKey:gsub("MIDDLE%s?MOUSE", "MM")
+    upperKey = upperKey:gsub("MOUSE%s?BUTTON%s?", "M")
+    upperKey = upperKey:gsub("BUTTON", "M")
+
+    -- Numpad bindings
+    upperKey = upperKey:gsub("NUMPAD%s?PLUS", "N+")
+    upperKey = upperKey:gsub("NUMPAD%s?MINUS", "N-")
+    upperKey = upperKey:gsub("NUMPAD%s?MULTIPLY", "N*")
+    upperKey = upperKey:gsub("NUMPAD%s?DIVIDE", "N/")
+    upperKey = upperKey:gsub("NUMPAD%s?DECIMAL", "N.")
+    upperKey = upperKey:gsub("NUMPAD%s?ENTER", "NEnt")
+    upperKey = upperKey:gsub("NUMPAD%s?", "N")
+    upperKey = upperKey:gsub("NUM%s?", "N")
+    upperKey = upperKey:gsub("NPAD%s?", "N")
+
+    -- Common keys
+    upperKey = upperKey:gsub("PAGE%s?UP", "PGU")
+    upperKey = upperKey:gsub("PAGE%s?DOWN", "PGD")
+    upperKey = upperKey:gsub("INSERT", "INS")
+    upperKey = upperKey:gsub("DELETE", "DEL")
+    upperKey = upperKey:gsub("SPACEBAR", "Spc")
+    upperKey = upperKey:gsub("ENTER", "Ent")
+    upperKey = upperKey:gsub("ESCAPE", "Esc")
+    upperKey = upperKey:gsub("TAB", "Tab")
+    upperKey = upperKey:gsub("CAPS%s?LOCK", "Caps")
+    upperKey = upperKey:gsub("HOME", "Hom")
+    upperKey = upperKey:gsub("END", "End")
+
+    return upperKey
+end
+
+-- ============================================================================
+-- ACTION BAR SCANNING
+-- ============================================================================
+
+-- Blizzard action bar button prefixes
+local ButtonRowsPrefix = {
+    [1] = "ActionButton",
+    [2] = "MultiBarBottomLeftButton",
+    [3] = "MultiBarBottomRightButton",
+    [4] = "MultiBarRightButton",
+    [5] = "MultiBarLeftButton",
+    [6] = "MultiBar5Button",
+    [7] = "MultiBar6Button",
+    [8] = "MultiBar7Button",
+}
+
+function Keybinds:GetActionsTableBySpellId()
+    PrintDebug("Building Actions Table By Spell ID")
+
+    local spellIdToKeyBind = {}
+
+    local function assignResultForSlot(slot, keyBind)
+        local actionType, id, subType = GetActionInfo(slot)
+        if not spellIdToKeyBind[id] then
+            if (actionType == "macro" and subType == "spell") or (actionType == "spell") then
+                spellIdToKeyBind[id] = keyBind
+                if ns.SpellIDOverrides[id] and not spellIdToKeyBind[ns.SpellIDOverrides[id]] then
+                    spellIdToKeyBind[ns.SpellIDOverrides[id]] = keyBind
+                end
+            elseif actionType == "macro" then
+                local macroName = GetActionText(slot)
+                local macroSpellID = GetMacroSpell(macroName)
+
+                if macroSpellID and not spellIdToKeyBind[macroSpellID] then
+                    spellIdToKeyBind[macroSpellID] = keyBind
+                    if
+                        ns.SpellIDOverrides[macroSpellID] and not spellIdToKeyBind[ns.SpellIDOverrides[macroSpellID]]
+                    then
+                        spellIdToKeyBind[ns.SpellIDOverrides[macroSpellID]] = keyBind
+                    end
+                end
+            elseif actionType == "item" then
+                local _spellName, spellId = C_Item.GetItemSpell(id)
+                if spellId and not spellIdToKeyBind[spellId] then
+                    spellIdToKeyBind[spellId] = keyBind
+                end
+            end
+        end
+    end
+
+    -- Scan all Blizzard action bars
+    for i = 1, 8 do
+        local bar = ButtonRowsPrefix[i]
+
+        if bar then
+            for j = 1, 12 do
+                local buttonName = bar .. j
+                local button = _G[buttonName]
+                local slot = button and button.action
+                local keyBoundTarget = button and button.commandName
+                if button and slot and keyBoundTarget then
+                    local keyBind = GetBindingKey(keyBoundTarget)
+                    if keyBind then
+                        assignResultForSlot(slot, keyBind)
+                    end
+                end
+            end
+        end
+    end
+    return spellIdToKeyBind
+end
+
+-- ============================================================================
+-- SPELL TO KEYBIND MAPPING
+-- ============================================================================
+
+local function BuildSpellKeyBindMapping()
+    local spellIDToKeyBind = Keybinds:GetActionsTableBySpellId()
+
+    local spellIDToKeyBindFormatted = {}
+
+    for spellID, rawKey in pairs(spellIDToKeyBind) do
+        if rawKey and rawKey ~= "" and rawKey ~= "●" and not spellIDToKeyBindFormatted[spellID] then
+            local formattedKey = GetFormattedKeybind(rawKey)
+            if formattedKey ~= "" then
+                spellIDToKeyBindFormatted[spellID] = formattedKey
+            end
+        end
+    end
+    for spellID, keyBind in pairs(spellIDToKeyBindCache) do
+        if not spellIDToKeyBindFormatted[spellID] then
+            spellIDToKeyBindFormatted[spellID] = keyBind
+        end
+    end
+    spellIDToKeyBindCache = spellIDToKeyBindFormatted
+    return spellIDToKeyBindFormatted
+end
+
+function Keybinds:FindKeyBindForSpell(spellID, spellToKeybind)
+    if not spellID or spellID == 0 then
+        return ""
+    end
+
+    -- Direct match
+    if spellToKeybind[spellID] then
+        return spellToKeybind[spellID]
+    end
+
+    -- Try override spell
+    local overrideSpellID = C_Spell.GetOverrideSpell(spellID)
+    if overrideSpellID and spellToKeybind[overrideSpellID] then
+        return spellToKeybind[overrideSpellID]
+    end
+
+    -- Try base spell
+    local baseSpellID = C_Spell.GetBaseSpell(spellID)
+    if baseSpellID and spellToKeybind[baseSpellID] then
+        return spellToKeybind[baseSpellID]
+    end
+
+    return ""
+end
+
+-- ============================================================================
+-- KEYBIND TEXT UI MANAGEMENT
+-- ============================================================================
+
+local function GetOrCreateKeybindText(icon, viewerSettingName)
+    if icon.cmcKeybindText and icon.cmcKeybindText.text then
+        return icon.cmcKeybindText.text
+    end
+
+    local settings = GetKeybindSettings(viewerSettingName)
+    icon.cmcKeybindText = CreateFrame("Frame", nil, icon, "BackdropTemplate")
+    icon.cmcKeybindText:SetFrameLevel(icon:GetFrameLevel() + 4)
+    local keybindText = icon.cmcKeybindText:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    keybindText:SetPoint(settings.anchor, icon, settings.anchor, settings.offsetX, settings.offsetY)
+    keybindText:SetTextColor(1, 1, 1, 1)
+    keybindText:SetShadowColor(0, 0, 0, 1)
+    keybindText:SetShadowOffset(1, -1)
+    keybindText:SetDrawLayer("OVERLAY", 7)
+
+    icon.cmcKeybindText.text = keybindText
+    return icon.cmcKeybindText.text
+end
+
+local function GetKeybindFontName()
+    if ns.db and ns.db.profile and ns.db.profile.cooldownManager_keybindFontName then
+        return ns.db.profile.cooldownManager_keybindFontName
+    end
+    return "Friz Quadrata TT"
+end
+
+local function ApplyKeybindTextSettings(icon, viewerSettingName)
+    if not icon.cmcKeybindText then
+        return
+    end
+
+    local settings = GetKeybindSettings(viewerSettingName)
+    local keybindText = GetOrCreateKeybindText(icon, viewerSettingName)
+
+    icon.cmcKeybindText:Show()
+    keybindText:ClearAllPoints()
+    keybindText:SetPoint(settings.anchor, icon, settings.anchor, settings.offsetX, settings.offsetY)
+    local fontName = GetKeybindFontName()
+    local fontPath = GetFontPath(fontName)
+    local fontFlags = ns.db.profile.cooldownManager_keybindFontFlags or {}
+    local fontFlag = ""
+    for n, v in pairs(fontFlags) do
+        if v == true then
+            fontFlag = fontFlag .. n .. ","
+        end
+    end
+    keybindText:SetFont(fontPath, settings.fontSize, fontFlag or "")
+end
+
+local function ExtractSpellIDFromChild(child)
+    if child.cooldownID then
+        local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(child.cooldownID)
+        if info then
+            return info.spellID
+        end
+    end
+    if child.spellID then
+        return child.spellID
+    end
+    return nil
+end
+
+local function UpdateIconKeybind(icon, viewerSettingName, keybind)
+    if not icon then
+        return
+    end
+
+    local enabledKey = "cooldownManager_showKeybinds_" .. viewerSettingName
+    if not ns.db.profile[enabledKey] then
+        if icon.cmcKeybindText then
+            icon.cmcKeybindText:Hide()
+        end
+        return
+    end
+
+    local keybindText = GetOrCreateKeybindText(icon, viewerSettingName)
+    icon.cmcKeybindText:Show()
+    keybindText:SetText(keybind)
+    keybindText:Show()
+    if not keybind or keybind == "" then
+        if icon.cmcKeybindText then
+            icon.cmcKeybindText:Hide()
+        end
+    end
+end
+
+-- ============================================================================
+-- VIEWER UPDATE FUNCTIONS
+-- ============================================================================
+
+local function UpdateViewerKeybinds(viewerName)
+    local viewerFrame = _G[viewerName]
+    if not viewerFrame then
+        return
+    end
+
+    local settingName = viewersSettingKey[viewerName]
+    if not settingName then
+        return
+    end
+
+    PrintDebug("UpdateViewerKeybinds for", viewerName)
+
+    local spellToKeybind = BuildSpellKeyBindMapping()
+
+    local children = { viewerFrame:GetChildren() }
+    for _, child in ipairs(children) do
+        if child.Icon then
+            local spellID = ExtractSpellIDFromChild(child)
+            local keybind = ""
+
+            if spellID then
+                keybind = Keybinds:FindKeyBindForSpell(spellID, spellToKeybind)
+            end
+
+            UpdateIconKeybind(child, settingName, keybind)
+        end
+    end
+end
+
+function Keybinds:UpdateViewerKeybinds(viewerName)
+    UpdateViewerKeybinds(viewerName)
+end
+
+function Keybinds:UpdateAllKeybinds()
+    for viewerName, _ in pairs(viewersSettingKey) do
+        UpdateViewerKeybinds(viewerName)
+        self:ApplyKeybindSettings(viewerName)
+    end
+end
+
+function Keybinds:ApplyKeybindSettings(viewerName)
+    local viewerFrame = _G[viewerName]
+    if not viewerFrame then
+        return
+    end
+
+    local settingName = viewersSettingKey[viewerName]
+    if not settingName then
+        return
+    end
+
+    local children = { viewerFrame:GetChildren() }
+    for _, child in ipairs(children) do
+        if child.cmcKeybindText then
+            ApplyKeybindTextSettings(child, settingName)
+        end
+    end
+end
+
+-- ============================================================================
+-- EVENT HANDLING
+-- ============================================================================
+
+local eventFrame = CreateFrame("Frame")
+
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    if not isModuleEnabled then
+        return
+    end
+
+    PrintDebug("Event:", event)
+    if
+        event == "PLAYER_SPECIALIZATION_CHANGED"
+        or event == "UPDATE_BINDINGS"
+        or event == "ACTIONBAR_HIDEGRID"
+        or event == "UPDATE_BONUS_ACTIONBAR"
+        or event == "GAME_PAD_ACTIVE_CHANGED"
+    then
+        spellIDToKeyBindCache = {}
+    end
+
+    C_Timer.After(0.1, function()
+        Keybinds:UpdateAllKeybinds()
+    end)
+end)
+
+-- ============================================================================
+-- MODULE LIFECYCLE MANAGEMENT
+-- ============================================================================
+
+function Keybinds:Shutdown()
+    PrintDebug("Shutting down module")
+
+    isModuleEnabled = false
+    eventFrame:UnregisterAllEvents()
+
+    for viewerName, _ in pairs(viewersSettingKey) do
+        local viewerFrame = _G[viewerName]
+        if viewerFrame then
+            local children = { viewerFrame:GetChildren() }
+            for _, child in ipairs(children) do
+                if child.cmcKeybindText then
+                    child.cmcKeybindText:Hide()
+                end
+            end
+        end
+    end
+end
+
+function Keybinds:Enable()
+    if isModuleEnabled then
+        return
+    end
+    PrintDebug("Enabling module")
+
+    isModuleEnabled = true
+
+    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    eventFrame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+    eventFrame:RegisterEvent("UPDATE_BINDINGS")
+    eventFrame:RegisterEvent("PLAYER_TALENT_UPDATE")
+    eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+    eventFrame:RegisterEvent("TRAIT_CONFIG_UPDATED")
+    eventFrame:RegisterEvent("EDIT_MODE_LAYOUTS_UPDATED")
+    eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    eventFrame:RegisterEvent("ACTIONBAR_HIDEGRID")
+    eventFrame:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
+    eventFrame:RegisterEvent("GAME_PAD_ACTIVE_CHANGED")
+
+    -- Hook into viewer layout refresh to update keybinds
+    if not areHooksInitialized then
+        areHooksInitialized = true
+
+        for viewerName, _ in pairs(viewersSettingKey) do
+            local viewerFrame = _G[viewerName]
+            if viewerFrame and viewerFrame.RefreshLayout then
+                hooksecurefunc(viewerFrame, "RefreshLayout", function()
+                    if not isModuleEnabled then
+                        return
+                    end
+                    PrintDebug("RefreshLayout called for viewer:", viewerName)
+                    UpdateViewerKeybinds(viewerName)
+                end)
+            end
+        end
+    end
+
+    self:UpdateAllKeybinds()
+end
+
+function Keybinds:Disable()
+    if not isModuleEnabled then
+        return
+    end
+    PrintDebug("Disabling module")
+    self:Shutdown()
+end
+
+function Keybinds:Initialize()
+    if not IsKeybindEnabledForAnyViewer() then
+        PrintDebug("Not initializing - no viewers enabled")
+        return
+    end
+
+    PrintDebug("Initializing module")
+    self:Enable()
+
+    -- Cleanup old DB cache if present
+    if ns.db and ns.db.profile then
+        ns.db.profile.keybindCache = nil
+    end
+end
+
+function Keybinds:OnSettingChanged(viewerSettingName)
+    local shouldBeEnabled = IsKeybindEnabledForAnyViewer()
+
+    if shouldBeEnabled and not isModuleEnabled then
+        self:Enable()
+    elseif not shouldBeEnabled and isModuleEnabled then
+        self:Disable()
+    elseif isModuleEnabled then
+        if viewerSettingName then
+            for viewerName, settingName in pairs(viewersSettingKey) do
+                if settingName == viewerSettingName then
+                    UpdateViewerKeybinds(viewerName)
+                    self:ApplyKeybindSettings(viewerName)
+                    return
+                end
+            end
+        end
+        self:UpdateAllKeybinds()
+    end
+end
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+local function OnAddonLoaded()
+    Keybinds:Initialize()
+end
+
+local loadFrame = CreateFrame("Frame")
+loadFrame:RegisterEvent("ADDON_LOADED")
+loadFrame:SetScript("OnEvent", function(self, event, arg1)
+    if arg1 == addonName then
+        Keybinds:Initialize()
+        self:UnregisterEvent("ADDON_LOADED")
+    end
+end)
